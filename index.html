@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Buy Me a Coffee Example</title>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Adding Bootstrap just to make the demo slightly more pretty (You can remove this if you're using another theming solution -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.0-beta1/dist/css/bootstrap.min.css" rel="stylesheet"
+          integrity="sha384-0evHe/X+R7YkIZDRvuzKMRqM+OrBnVFBL6DOitfPri4tjfHxaWutUpFmBp4vmVor" crossorigin="anonymous">
+    <style>
+        .wallet-name {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<div class="container my-5 py-5">
+    <form>
+        <div class="form-group mb-4">
+            <label for="addr">My Address</label>
+            <!-- Change the value of this input to your Cardano receiving address -->
+            <input type="text" class="pay-addr form-control" readonly id="addr"
+                   value="addr1vx4aff5gtjzm3xq4cq8syzq7zqnkh69ev0399qvketqg0qqx2cw78"/>
+        </div>
+        <div class="form-group mb-4">
+            <label for="value">Amount to Send (&#8371;) [Min: 1, Max: 45 Billion]</label>
+            <!-- User can change this or you can hard-code the value in your JS -->
+            <input type="number" class="pay-value form-control" step="0.000001" value="2" min="1.000000" max="45000000000.000000"
+                   id="value" required/>
+        </div>
+        <div class="wallet-options">
+
+        </div>
+    </form>
+</div>
+<!-- Bootstrap JS (You can remove this if you're using another theming solution -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.0-beta1/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-pprn3073KE6tl6bjs2QrFaJGz5/SUsLqktiwsUTF55Jfv3qYSDhgCecCxMW52nD2"
+        crossorigin="anonymous"></script>
+
+<script type="text/javascript" src="https://code.jquery.com/jquery-3.6.0.min.js" crossorigin="anonymous"></script>
+<!-- Thank you to the team at DripDropz for hosting this browser-friendly version of Cardano Serialization Library
+on their CDN and thank you to the team at Eternl for helping to compile it properly! This bundle.js is simply a way
+to import Node.js Buffer lib into Vanilla JS. Buffer will be defined as Buffer -->
+<script type="text/javascript" src="https://cdn.dripdropz.io/wallet-connector/csl-v10.0.4/bundle.js"
+        crossorigin="anonymous"></script>
+<script type="module">
+    import * as CSL from 'https://cdn.dripdropz.io/wallet-connector/csl-v10.0.4/init.js';
+
+    (function ($) {
+        const wallet_options = $('.wallet-options');
+        const wallets = [];
+
+        // 1 = Mainnet, 0 = Testnet
+        const network_mode = 1;
+        const network_retries = 10;
+
+        // Size (in px) that wallet images will be
+        const btn_height = 48;
+
+        // Hide the section containing wallet buttons unless the user has light wallet extensions installed.
+        let has_cardano = false;
+        let wallet = null;
+
+        // TODO: Update this dynamically at run-time from Koios (https://api.koios.rest/#get-/epoch_params)
+        const protocolParameters = {
+            linearFee: {
+                minFeeA: "44",
+                minFeeB: "155381",
+            },
+            minUtxo: "1000000",
+            poolDeposit: "500000000",
+            keyDeposit: "2000000",
+            maxValSize: "5000",
+            maxTxSize: 16384,
+            costPerWord: "34482"
+        };
+
+        const supported_wallets = [
+            "nami",
+            "eternl",
+            "flint",
+            "typhoncip30",
+            "gerowallet"
+        ];
+
+        const showError = (msg) => console.error("ERROR: " + msg);
+        const showSuccess = (msg) => alert("SUCCESS: " + msg);
+        const fromHex = (hex) => Buffer.Buffer.from(hex, "hex");
+        const toHex = (bytes) => Buffer.Buffer.from(bytes).toString("hex");
+        const arrayToString = (array) => {
+            var out, i, len, c;
+            var char2, char3;
+
+            out = "";
+            len = array.length;
+            i = 0;
+            while (i < len) {
+                c = array[i++];
+                switch (c >> 4) {
+                    case 0:
+                    case 1:
+                    case 2:
+                    case 3:
+                    case 4:
+                    case 5:
+                    case 6:
+                    case 7:
+                        // 0xxxxxxx
+                        out += String.fromCharCode(c);
+                        break;
+                    case 12:
+                    case 13:
+                        // 110x xxxx   10xx xxxx
+                        char2 = array[i++];
+                        out += String.fromCharCode(((c & 0x1F) << 6) | (char2 & 0x3F));
+                        break;
+                    case 14:
+                        // 1110 xxxx  10xx xxxx  10xx xxxx
+                        char2 = array[i++];
+                        char3 = array[i++];
+                        out += String.fromCharCode(((c & 0x0F) << 12) |
+                            ((char2 & 0x3F) << 6) |
+                            ((char3 & 0x3F) << 0));
+                        break;
+                }
+            }
+
+            return out;
+        }
+        const toUint8Array = (cbor) => Uint8Array.from(Buffer.Buffer.from(cbor, "hex"));
+
+        async function payAda($e) {
+            // Stop the button from behaving like a normal button...
+            $e.preventDefault();
+            $e.stopPropagation();
+
+            // This gets us a handle to the button itself
+            const self = $($e.currentTarget);
+            // Disable the button while we work on generating the transaction
+            self.attr('disabled', 'disabled');
+
+            const walletName = $e.currentTarget.dataset.wallet;
+            if (!walletName) {
+                showError("Wallet name was not defined.");
+                self.removeAttr('disabled');
+                return;
+            }
+
+            let parentForm = self.closest('form');
+            let paymentAddr = parentForm.find('.pay-addr').val();
+            let paymentAmt = parentForm.find('.pay-value').val();
+
+            if (!paymentAddr.length) {
+                showError("Could not locate the payment address. Can't send a txn. :(")
+                self.removeAttr('disabled');
+                return;
+            }
+
+            // We need to convert the payment amount into Lovelace (the base token of Cardano)
+            paymentAmt = paymentAmt * 1000000;
+
+            if (window.cardano[walletName] === undefined) {
+                showError("Wallet is not installed?");
+                self.removeAttr('disabled');
+                return;
+            }
+
+            if (wallet === null) {
+                try {
+                    wallet = await window.cardano[walletName].enable();
+                } catch (err) {
+                    showError(err);
+                    self.removeAttr('disabled');
+                    return;
+                }
+            }
+
+            if (wallet.getNetworkId === undefined) {
+                showError("You did not connect your wallet!");
+                self.removeAttr('disabled');
+                return;
+            }
+
+            const wallet_network = await wallet.getNetworkId();
+            if (wallet_network !== network_mode) {
+                showError("Your wallet's network mode does not match the page network mode!", wallet_network, network_mode);
+                self.removeAttr('disabled');
+                return;
+            }
+
+            const change_addr = CSL.Address.from_bytes(Uint8Array.from(fromHex(await wallet.getChangeAddress())));
+
+            const txBuilder = CSL.TransactionBuilder.new(
+                CSL.TransactionBuilderConfigBuilder.new()
+                    .fee_algo(
+                        CSL.LinearFee.new(
+                            CSL.BigNum.from_str(protocolParameters.linearFee.minFeeA),
+                            CSL.BigNum.from_str(protocolParameters.linearFee.minFeeB)
+                        )
+                    )
+                    .pool_deposit(CSL.BigNum.from_str(protocolParameters.poolDeposit))
+                    .key_deposit(CSL.BigNum.from_str(protocolParameters.keyDeposit))
+                    .coins_per_utxo_word(CSL.BigNum.from_str(protocolParameters.costPerWord))
+                    .max_value_size(protocolParameters.maxValSize)
+                    .max_tx_size(protocolParameters.maxTxSize)
+                    .build()
+            );
+
+            const payment_addr = CSL.Address.from_bech32(paymentAddr);
+
+            txBuilder.add_output(
+                CSL.TransactionOutputBuilder.new().with_address(payment_addr).next().with_coin(CSL.BigNum.from_str(paymentAmt.toString())).build()
+            );
+
+            const inputs = CSL.TransactionUnspentOutputs.new();
+
+            (await wallet.getUtxos()).map((utxo) => inputs.add(CSL.TransactionUnspentOutput.from_bytes(fromHex(utxo))));
+
+            try {
+                txBuilder.add_inputs_from(inputs, CSL.CoinSelectionStrategyCIP2.LargestFirstMultiAsset);
+            } catch (err) {
+                alert("Sorry, we were not able to build a successful transaction at this time. This may be due to your wallet lacking the necessary asset(s) or token fragmentation.");
+                showError("Error attempting to add inputs?", err);
+                self.removeAttr('disabled');
+                return;
+            }
+
+            try {
+                txBuilder.add_change_if_needed(change_addr);
+            } catch (err) {
+                txBuilder.add_output(
+                    CSL.TransactionOutputBuilder.new().with_address(change_addr).next().with_coin(CSL.BigNum.from_str('1000000')).build()
+                );
+                txBuilder.add_inputs_from(inputs, CSL.CoinSelectionStrategyCIP2.LargestFirstMultiAsset);
+                try {
+                    txBuilder.add_change_if_needed(change_addr);
+                } catch (err) {
+                    showError(err);
+                    alert("Sorry, we were not able to build a successful transaction at this time.");
+                    self.removeAttr('disabled');
+                    return;
+                }
+            }
+
+            const transactionWitnessSet = CSL.TransactionWitnessSet.new();
+            const txBody = txBuilder.build();
+            const tx = CSL.Transaction.new(
+                txBody,
+                CSL.TransactionWitnessSet.from_bytes(transactionWitnessSet.to_bytes())
+            );
+
+            try {
+                const txVkeyWitnesses = await wallet.signTx(toHex(tx.to_bytes()), true);
+                const witnesses = CSL.TransactionWitnessSet.from_bytes(fromHex(txVkeyWitnesses));
+                transactionWitnessSet.set_vkeys(witnesses.vkeys());
+
+                const signedTx = CSL.Transaction.new(
+                    tx.body(),
+                    transactionWitnessSet
+                )
+
+                try {
+                    const txData = await wallet.submitTx(toHex(signedTx.to_bytes()));
+                    showSuccess(`Transaction submitted! Transaction ID: ${txData}`);
+                    self.removeAttr('disabled');
+                } catch (err) {
+                    showError("Error during submission?", err);
+                    self.removeAttr('disabled');
+                }
+            } catch (err) {
+                showError("The user cancelled the transaction?", err);
+                self.removeAttr('disabled');
+            }
+
+            self.removeAttr('disabled');
+
+        }
+
+        async function run() {
+            wallet_options.hide();
+
+            let retries = network_retries;
+
+            let x = setInterval(() => {
+                if (retries === 0) {
+                    clearInterval(x);
+                    return;
+                }
+
+                if (!window.cardano) {
+                    retries--;
+                    return;
+                }
+
+                if (!has_cardano) {
+                    // This is our first time recognizing the window.cardano object,
+                    // show the wallet options area and register our on-click events.
+                    wallet_options.show();
+                    has_cardano = true;
+                    $(document).on('click', '.wallet-btn', payAda);
+                }
+
+                supported_wallets.forEach((wallet) => {
+                    if (wallets.includes(wallet)) {
+                        // We have already initialized this wallet...
+                        return;
+                    }
+
+                    if (window.cardano[wallet] === undefined) {
+                        // This wallet extension was not found...
+                        return;
+                    }
+
+                    let the_wallet = window.cardano[wallet];
+
+                    let btn = `<button type="button" class="wallet-btn btn btn-light mx-2" data-wallet="${wallet}">` +
+                        `<img src="${the_wallet.icon}" alt="${the_wallet.name}" height="${btn_height}" class="wallet-icon"  />` +
+                        `<span class="wallet-name sr-only">${the_wallet.name}</span>` +
+                        `</button>`;
+
+                    wallet_options.append(btn);
+                    wallets.push(wallet);
+                });
+                retries--;
+            }, 250);
+        }
+
+        $(document).ready(function () {
+            run();
+        });
+
+    })(jQuery);
+</script>
+</body>
+</html>
